@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <wincodec.h>
 #include <math.h>
+#include <stdint.h>
 #include <avif/avif.h>
 
 #define INTERMEDIATE_BITS 16  // bit depth of the integer texture given to the encoder
@@ -27,13 +28,13 @@ float pq_inv_eotf(float y) {
     return powf((c1 + c2 * powf(y, m1)) / (1 + c3 * powf(y, m1)), m2);
 }
 
-static float scrgb_to_bt2100[3][3] = {
+static const float scrgb_to_bt2100[3][3] = {
         {2939026994.L / 585553224375.L, 9255011753.L / 3513319346250.L, 173911579.L / 501902763750.L},
         {76515593.L / 138420033750.L,   6109575001.L / 830520202500.L,  75493061.L / 830520202500.L},
         {12225392.L / 93230009375.L,    1772384008.L / 2517210253125.L, 18035212433.L / 2517210253125.L},
 };
 
-void matrixVectorMult(float *in, float *out, float *matrix) {
+void matrixVectorMult(const float *in, float *out, const float *matrix) {
     for (int i = 0; i < 3; i++) {
         float res = 0;
         for (int j = 0; j < 3; j++) {
@@ -53,6 +54,8 @@ typedef struct ThreadData {
     unsigned int width;
     int start;
     int stop;
+    float maxMaxComp;
+    double sumOfMaxComp;
 } ThreadData;
 
 DWORD WINAPI ThreadFunc(LPVOID lpParam) {
@@ -63,6 +66,9 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
     int start = d->start;
     int stop = d->stop;
 
+    float maxMaxComp = 0;
+    double sumOfMaxComp = 0;
+
     for (UINT i = start; i < stop; i++) {
         for (int j = 0; j < width; j++) {
             float *cur = ((float *) pixels + i * 3 * width) + 3 * j;
@@ -71,11 +77,27 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
             matrixVectorMult(cur, bt2020, (float *) scrgb_to_bt2100);
 
             for (int k = 0; k < 3; k++) {
+                bt2020[k] = saturate(bt2020[k]);
+            }
+
+            float maxComp = max(bt2020[0], max(bt2020[1], bt2020[2]));
+
+            if (maxComp > maxMaxComp) {
+                maxMaxComp = maxComp;
+            }
+
+            sumOfMaxComp += maxComp;
+
+            for (int k = 0; k < 3; k++) {
                 converted[3 * width * i + 3 * j + k] = (unsigned short) roundf(
-                        pq_inv_eotf(saturate(bt2020[k])) * ((1 << INTERMEDIATE_BITS) - 1));
+                        pq_inv_eotf(bt2020[k]) * ((1 << INTERMEDIATE_BITS) - 1));
             }
         }
     }
+
+    d->maxMaxComp = maxMaxComp;
+    d->sumOfMaxComp = sumOfMaxComp;
+
     return 0;
 }
 
@@ -195,7 +217,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    unsigned short *converted = malloc(sizeof(short) * width * height * 3);
+    unsigned short *converted = malloc(sizeof(uint16_t) * width * height * 3);
 
     if (converted == NULL) {
         fprintf(stderr, "Failed to allocate converted pixels\n");
@@ -208,6 +230,8 @@ int main(int argc, char *argv[]) {
     printf("Using %d threads\n", numThreads);
 
     puts("Converting pixels to BT.2100 PQ...");
+
+    uint16_t maxCLL, maxPALL;
 
     {
 
@@ -266,10 +290,24 @@ int main(int argc, char *argv[]) {
 
         WaitForMultipleObjects(numThreads, hThreadArray, TRUE, INFINITE);
 
+        float maxMaxComp = 0;
+        double sumOfMaxComp = 0;
+
         for (int i = 0; i < numThreads; i++) {
             CloseHandle(hThreadArray[i]);
+
+            float tMaxMaxComp = threadData[i]->maxMaxComp;
+            if (tMaxMaxComp > maxMaxComp) {
+                maxMaxComp = tMaxMaxComp;
+            }
+
+            sumOfMaxComp += threadData[i]->sumOfMaxComp;
+
             free(threadData[i]);
         }
+
+        maxCLL = (uint16_t) roundf(maxMaxComp * 10000);
+        maxPALL = (uint16_t) round(10000 * (sumOfMaxComp / (double)((uint64_t) width * height)));
 
         free(pixels);
     }
@@ -305,6 +343,11 @@ int main(int argc, char *argv[]) {
     image->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT2020_NCL;
 #endif
 
+    printf("Computed HDR metadata: %u maxCLL, %u maxPALL\n", maxCLL, maxPALL);
+
+    image->clli.maxCLL = maxCLL;
+    image->clli.maxPALL = maxPALL;
+
     // If you have RGB(A) data you want to encode, use this path
     printf("Doing AVIF encoding...\n");
 
@@ -314,7 +357,7 @@ int main(int argc, char *argv[]) {
     rgb.format = AVIF_RGB_FORMAT_RGB;
     rgb.depth = INTERMEDIATE_BITS;
     rgb.pixels = (void *) converted;
-    rgb.rowBytes = 3 * sizeof(short) * width;
+    rgb.rowBytes = 3 * sizeof(uint16_t) * width;
 
     avifResult convertResult = avifImageRGBToYUV(image, &rgb);
     if (convertResult != AVIF_RESULT_OK) {
