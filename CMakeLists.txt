@@ -8,4 +8,4 @@ find_library(AVIF_LIBRARY avif PATHS ${PROJECT_SOURCE_DIR}/lib REQUIRED NO_DEFAU
 find_library(AOM_LIBRARY aom PATHS ${PROJECT_SOURCE_DIR}/lib REQUIRED NO_DEFAULT_PATH)
 find_library(SHARPYUV_LIBRARY sharpyuv PATHS ${PROJECT_SOURCE_DIR}/lib REQUIRED NO_DEFAULT_PATH)
 
-target_link_libraries(jxr_to_avif ${AVIF_LIBRARY} ${AOM_LIBRARY} ${SHARPYUV_LIBRARY} windowscodecs "$<$<CONFIG:Release>:-s -static>")
+target_link_libraries(jxr_to_avif ${AVIF_LIBRARY} ${AOM_LIBRARY} "$<$<CONFIG:Release>:-s -static>")
