@@ -8,7 +8,8 @@
 #include <wincodec.h>
 #include <math.h>
 #include <stdint.h>
-#include <avif/avif.h>
+
+#include "avif.h"
 
 #define INTERMEDIATE_BITS 16  // bit depth of the integer texture given to the encoder
 #define ENCODER_SPEED 6  // 6 is default speed of the command line encoder, so it should be a good value?
@@ -49,29 +50,31 @@ float saturate(float x) {
 }
 
 typedef struct ThreadData {
-    float *pixels;
-    unsigned short *converted;
-    unsigned int width;
-    int start;
-    int stop;
+    _Float16 *pixels;
+    uint16_t *converted;
+    uint32_t width;
+    uint32_t start;
+    uint32_t stop;
     float maxMaxComp;
     double sumOfMaxComp;
 } ThreadData;
 
 DWORD WINAPI ThreadFunc(LPVOID lpParam) {
     ThreadData *d = (ThreadData *) lpParam;
-    float *pixels = d->pixels;
-    unsigned short *converted = d->converted;
-    unsigned int width = d->width;
-    int start = d->start;
-    int stop = d->stop;
+    _Float16 *pixels = d->pixels;
+    uint16_t *converted = d->converted;
+    uint32_t width = d->width;
+    uint32_t start = d->start;
+    uint32_t stop = d->stop;
 
     float maxMaxComp = 0;
     double sumOfMaxComp = 0;
 
-    for (UINT i = start; i < stop; i++) {
-        for (int j = 0; j < width; j++) {
-            float *cur = ((float *) pixels + i * 3 * width) + 3 * j;
+    for (uint32_t i = start; i < stop; i++) {
+        for (uint32_t j = 0; j < width; j++) {
+            _Float16 *cur16 = pixels + i * 4 * width + 4 * j;
+            float cur[3] = {(float) cur16[0], (float) cur16[1], (float) cur16[2]};
+
             float bt2020[3];
 
             matrixVectorMult(cur, bt2020, (float *) scrgb_to_bt2100);
@@ -89,7 +92,7 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
             sumOfMaxComp += maxComp;
 
             for (int k = 0; k < 3; k++) {
-                converted[3 * width * i + 3 * j + k] = (unsigned short) roundf(
+                converted[(size_t) 3 * width * i + (size_t) 3 * j + k] = (uint16_t) roundf(
                         pq_inv_eotf(bt2020[k]) * ((1 << INTERMEDIATE_BITS) - 1));
             }
         }
@@ -196,19 +199,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    IWICBitmapSource *pConverter = NULL;
-
-    hr = WICConvertBitmapSource(&GUID_WICPixelFormat96bppRGBFloat, pBitmapSource, &pConverter);
-
-    if (FAILED(hr)) {
-        fprintf(stderr, "Failed to convert pixel format\n");
-        return 1;
-    }
-
-    pBitmapSource->lpVtbl->Release(pBitmapSource);
-    pBitmapSource = pConverter;
-
-    unsigned int width, height;
+    uint32_t width, height;
 
     hr = pBitmapSource->lpVtbl->GetSize(pBitmapSource, &width, &height);
 
@@ -217,7 +208,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    unsigned short *converted = malloc(sizeof(uint16_t) * width * height * 3);
+    uint16_t *converted = malloc(sizeof(uint16_t) * width * height * 3);
 
     if (converted == NULL) {
         fprintf(stderr, "Failed to allocate converted pixels\n");
@@ -226,7 +217,7 @@ int main(int argc, char *argv[]) {
 
     SYSTEM_INFO systemInfo;
     GetSystemInfo(&systemInfo);
-    int numThreads = (int) systemInfo.dwNumberOfProcessors;
+    uint32_t numThreads = systemInfo.dwNumberOfProcessors;
     printf("Using %d threads\n", numThreads);
 
     puts("Converting pixels to BT.2100 PQ...");
@@ -235,10 +226,10 @@ int main(int argc, char *argv[]) {
 
     {
 
-        UINT cbStride = width * sizeof(float) * 3;
+        UINT cbStride = width * sizeof(_Float16) * 4;
         UINT cbBufferSize = cbStride * height;
 
-        float *pixels = malloc(cbBufferSize);
+        _Float16 *pixels = malloc(cbBufferSize);
 
         if (converted == NULL) {
             fprintf(stderr, "Failed to allocate float pixels\n");
@@ -265,9 +256,9 @@ int main(int argc, char *argv[]) {
         ThreadData *threadData[numThreads];
         DWORD dwThreadIdArray[numThreads];
 
-        int chunkSize = (int) height / numThreads;
+        uint32_t chunkSize = (uint32_t) height / numThreads;
 
-        for (int i = 0; i < numThreads; i++) {
+        for (uint32_t i = 0; i < numThreads; i++) {
             threadData[i] = malloc(sizeof(threadData));
             threadData[i]->pixels = pixels;
             threadData[i]->converted = converted;
@@ -293,7 +284,7 @@ int main(int argc, char *argv[]) {
         float maxMaxComp = 0;
         double sumOfMaxComp = 0;
 
-        for (int i = 0; i < numThreads; i++) {
+        for (uint32_t i = 0; i < numThreads; i++) {
             CloseHandle(hThreadArray[i]);
 
             float tMaxMaxComp = threadData[i]->maxMaxComp;
@@ -307,7 +298,7 @@ int main(int argc, char *argv[]) {
         }
 
         maxCLL = (uint16_t) roundf(maxMaxComp * 10000);
-        maxPALL = (uint16_t) round(10000 * (sumOfMaxComp / (double)((uint64_t) width * height)));
+        maxPALL = (uint16_t) round(10000 * (sumOfMaxComp / (double) ((uint64_t) width * height)));
 
         free(pixels);
     }
@@ -382,7 +373,7 @@ int main(int argc, char *argv[]) {
     encoder->quality = AVIF_QUALITY_LOSSLESS;
     encoder->qualityAlpha = AVIF_QUALITY_LOSSLESS;
     encoder->speed = ENCODER_SPEED;
-    encoder->maxThreads = numThreads;
+    encoder->maxThreads = (int) numThreads;
     encoder->autoTiling = USE_TILING;
 
     // Call avifEncoderAddImage() for each image in your sequence
