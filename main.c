@@ -19,6 +19,9 @@
 #define TARGET_FORMAT AVIF_PIXEL_FORMAT_YUV444
 //#define TARGET_RGB  // uncomment to output RGB instead of YUV (much larger file size)
 
+#define LIGHTLEVEL_IS_LUMINANCE  // comment out to calculate light level according to spec (using max of rgb channels)
+#define MAXCLL_PERCENTILE 0.9999  // comment out to calculate true maxCLL instead of top percentile
+
 static float m1 = 1305 / 8192.f;
 static float m2 = 2523 / 32.f;
 static float c1 = 107 / 128.f;
@@ -55,8 +58,11 @@ typedef struct ThreadData {
     uint32_t width;
     uint32_t start;
     uint32_t stop;
-    float maxMaxComp;
     double sumOfMaxComp;
+#ifdef MAXCLL_PERCENTILE
+    uint32_t *nitCounts;
+#endif
+    uint16_t maxNits;
 } ThreadData;
 
 DWORD WINAPI ThreadFunc(LPVOID lpParam) {
@@ -83,8 +89,16 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
                 bt2020[k] = saturate(bt2020[k]);
             }
 
+#ifdef LIGHTLEVEL_IS_LUMINANCE
+            float maxComp = bt2020[1];
+#else
             float maxComp = max(bt2020[0], max(bt2020[1], bt2020[2]));
+#endif
 
+#ifdef MAXCLL_PERCENTILE
+            uint32_t nits = (uint32_t) roundf(maxComp * 10000);
+            d->nitCounts[nits]++;
+#endif
             if (maxComp > maxMaxComp) {
                 maxMaxComp = maxComp;
             }
@@ -98,7 +112,7 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
         }
     }
 
-    d->maxMaxComp = maxMaxComp;
+    d->maxNits = (uint16_t) roundf(maxMaxComp * 10000);
     d->sumOfMaxComp = sumOfMaxComp;
 
     return 0;
@@ -270,6 +284,10 @@ int main(int argc, char *argv[]) {
                 threadData[i]->stop = (int) height;
             }
 
+#ifdef MAXCLL_PERCENTILE
+            threadData[i]->nitCounts = calloc(10000,sizeof(typeof(threadData[i]->nitCounts[0])));
+#endif
+
             hThreadArray[i] = CreateThread(
                     NULL,                   // default security attributes
                     0,                      // use default stack size
@@ -281,23 +299,43 @@ int main(int argc, char *argv[]) {
 
         WaitForMultipleObjects(numThreads, hThreadArray, TRUE, INFINITE);
 
-        float maxMaxComp = 0;
+        maxCLL = 0;
         double sumOfMaxComp = 0;
 
         for (uint32_t i = 0; i < numThreads; i++) {
             CloseHandle(hThreadArray[i]);
 
-            float tMaxMaxComp = threadData[i]->maxMaxComp;
-            if (tMaxMaxComp > maxMaxComp) {
-                maxMaxComp = tMaxMaxComp;
+            uint16_t tMaxNits = threadData[i]->maxNits;
+            if (tMaxNits > maxCLL) {
+                maxCLL = tMaxNits;
             }
 
             sumOfMaxComp += threadData[i]->sumOfMaxComp;
+        }
 
+#ifdef MAXCLL_PERCENTILE
+        uint16_t currentIdx = maxCLL;
+        uint64_t count = 0;
+        uint64_t countTarget = (uint64_t) round((1 - MAXCLL_PERCENTILE) * (double) ((uint64_t) width * height));
+        while (1) {
+            for (uint32_t i = 0; i < numThreads; i++) {
+                count += threadData[i]->nitCounts[currentIdx];
+            }
+            if (count >= countTarget) {
+                maxCLL = currentIdx;
+                break;
+            }
+            currentIdx--;
+        }
+#endif
+
+        for (uint32_t i = 0; i < numThreads; i++) {
+#ifdef MAXCLL_PERCENTILE
+            free(threadData[i]->nitCounts);
+#endif
             free(threadData[i]);
         }
 
-        maxCLL = (uint16_t) roundf(maxMaxComp * 10000);
         maxPALL = (uint16_t) round(10000 * (sumOfMaxComp / (double) ((uint64_t) width * height)));
 
         free(pixels);
@@ -355,6 +393,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to convert to YUV(A): %s\n", avifResultToString(convertResult));
         goto cleanup;
     }
+
+    free(rgb.pixels);
 
     encoder = avifEncoderCreate();
     if (!encoder) {
