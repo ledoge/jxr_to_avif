@@ -12,15 +12,14 @@
 #include "avif.h"
 
 #define INTERMEDIATE_BITS 16  // bit depth of the integer texture given to the encoder
-#define ENCODER_SPEED 6  // 6 is default speed of the command line encoder, so it should be a good value?
+#define DEFAULT_SPEED 6  // 6 is default speed of the command line encoder, so it should be a good value?
 #define USE_TILING AVIF_TRUE  // slightly larger file size, but faster encode and decode
 
 #define TARGET_BITS 12  // bit depth of the output, should be 10 or 12
 #define TARGET_FORMAT AVIF_PIXEL_FORMAT_YUV444
 //#define TARGET_RGB  // uncomment to output RGB instead of YUV (much larger file size)
 
-#define LIGHTLEVEL_IS_LUMINANCE  // comment out to calculate light level according to spec (using max of rgb channels)
-#define MAXCLL_PERCENTILE 0.9999  // comment out to calculate true maxCLL instead of top percentile
+#define MAXCLL_PERCENTILE 0.9999  // comment out to calculate true MaxCLL instead of top percentile
 
 static float m1 = 1305 / 8192.f;
 static float m2 = 2523 / 32.f;
@@ -53,7 +52,8 @@ float saturate(float x) {
 }
 
 typedef struct ThreadData {
-    _Float16 *pixels;
+    uint8_t *pixels;
+    uint8_t bytesPerColor;
     uint16_t *converted;
     uint32_t width;
     uint32_t start;
@@ -67,7 +67,8 @@ typedef struct ThreadData {
 
 DWORD WINAPI ThreadFunc(LPVOID lpParam) {
     ThreadData *d = (ThreadData *) lpParam;
-    _Float16 *pixels = d->pixels;
+    uint8_t *pixels = d->pixels;
+    uint8_t bytesPerColor = d->bytesPerColor;
     uint16_t *converted = d->converted;
     uint32_t width = d->width;
     uint32_t start = d->start;
@@ -78,22 +79,25 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
 
     for (uint32_t i = start; i < stop; i++) {
         for (uint32_t j = 0; j < width; j++) {
-            _Float16 *cur16 = pixels + i * 4 * width + 4 * j;
-            float cur[3] = {(float) cur16[0], (float) cur16[1], (float) cur16[2]};
-
             float bt2020[3];
 
-            matrixVectorMult(cur, bt2020, (float *) scrgb_to_bt2100);
+            if (bytesPerColor == 4) {
+                matrixVectorMult((float *) pixels + i * 4 * width + 4 * j, bt2020, (float *) scrgb_to_bt2100);
+            } else {
+                float cur[3];
+                _Float16 *cur16 = (_Float16 *) pixels + i * 4 * width + 4 * j;
+                for (int k = 0; k < 3; k++) {
+                    cur[k] = (float) cur16[k];
+                }
+                matrixVectorMult(cur, bt2020, (float *) scrgb_to_bt2100);
+            }
+
 
             for (int k = 0; k < 3; k++) {
                 bt2020[k] = saturate(bt2020[k]);
             }
 
-#ifdef LIGHTLEVEL_IS_LUMINANCE
-            float maxComp = bt2020[1];
-#else
             float maxComp = max(bt2020[0], max(bt2020[1], bt2020[2]));
-#endif
 
 #ifdef MAXCLL_PERCENTILE
             uint32_t nits = (uint32_t) roundf(maxComp * 10000);
@@ -119,11 +123,12 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 2 && argc != 3) {
-        fprintf(stderr, "jxr_to_avif input.jxr [output.avif]\n");
+    if (argc == 1 || argc > 3 && strcmp(argv[1], "--speed") || argc > 5) {
+        fprintf(stderr, "jxr_to_avif [--speed n] input.jxr [output.avif]\n");
         return 1;
     }
 
+    int speed = DEFAULT_SPEED;
     LPWSTR inputFile;
     LPWSTR outputFile = L"output.avif";
 
@@ -137,10 +142,21 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
-        inputFile = szArglist[1];
+        int rest = 1;
 
-        if (argc == 3) {
-            outputFile = szArglist[2];
+        if (!strcmp("--speed", argv[1])) {
+            speed = atoi(argv[2]);
+            if (speed < AVIF_SPEED_SLOWEST || speed > AVIF_SPEED_FASTEST) {
+                fprintf(stderr, "Speed must be in range [%d, %d]", AVIF_SPEED_SLOWEST, AVIF_SPEED_FASTEST);
+                return 1;
+            }
+            rest += 2;
+        }
+
+        inputFile = szArglist[rest + 0];
+
+        if (rest + 1 < argc) {
+            outputFile = szArglist[rest + 1];
         }
     }
 
@@ -208,8 +224,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (!IsEqualGUID((void *) &pixelFormat, (void *) &GUID_WICPixelFormat64bppRGBAHalf)) {
-        fprintf(stderr, "Wrong pixel format\n");
+    uint8_t bytesPerColor;
+
+    if (IsEqualGUID((void *) &pixelFormat, (void *) &GUID_WICPixelFormat128bppRGBAFloat)) {
+        bytesPerColor = 4;
+    } else if (IsEqualGUID((void *) &pixelFormat, (void *) &GUID_WICPixelFormat64bppRGBAHalf)) {
+        bytesPerColor = 2;
+    } else {
+        fprintf(stderr, "Unsupported pixel format\n");
         return 1;
     }
 
@@ -240,10 +262,10 @@ int main(int argc, char *argv[]) {
 
     {
 
-        UINT cbStride = width * sizeof(_Float16) * 4;
+        UINT cbStride = width * bytesPerColor * 4;
         UINT cbBufferSize = cbStride * height;
 
-        _Float16 *pixels = malloc(cbBufferSize);
+        uint8_t *pixels = malloc(cbBufferSize);
 
         if (converted == NULL) {
             fprintf(stderr, "Failed to allocate float pixels\n");
@@ -259,7 +281,7 @@ int main(int argc, char *argv[]) {
                                                &rc,
                                                cbStride,
                                                cbBufferSize,
-                                               (BYTE *) pixels);
+                                               pixels);
 
         if (FAILED(hr)) {
             fprintf(stderr, "Failed to copy pixels\n");
@@ -275,6 +297,7 @@ int main(int argc, char *argv[]) {
         for (uint32_t i = 0; i < numThreads; i++) {
             threadData[i] = malloc(sizeof(threadData));
             threadData[i]->pixels = pixels;
+            threadData[i]->bytesPerColor = bytesPerColor;
             threadData[i]->converted = converted;
             threadData[i]->width = width;
             threadData[i]->start = i * chunkSize;
@@ -285,7 +308,7 @@ int main(int argc, char *argv[]) {
             }
 
 #ifdef MAXCLL_PERCENTILE
-            threadData[i]->nitCounts = calloc(10000,sizeof(typeof(threadData[i]->nitCounts[0])));
+            threadData[i]->nitCounts = calloc(10000, sizeof(typeof(threadData[i]->nitCounts[0])));
 #endif
 
             hThreadArray[i] = CreateThread(
@@ -372,7 +395,7 @@ int main(int argc, char *argv[]) {
     image->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT2020_NCL;
 #endif
 
-    printf("Computed HDR metadata: %u maxCLL, %u maxPALL\n", maxCLL, maxPALL);
+    printf("Computed HDR metadata: %u MaxCLL, %u MaxPALL\n", maxCLL, maxPALL);
 
     image->clli.maxCLL = maxCLL;
     image->clli.maxPALL = maxPALL;
@@ -412,7 +435,7 @@ int main(int argc, char *argv[]) {
     // * timescale
     encoder->quality = AVIF_QUALITY_LOSSLESS;
     encoder->qualityAlpha = AVIF_QUALITY_LOSSLESS;
-    encoder->speed = ENCODER_SPEED;
+    encoder->speed = speed;
     encoder->maxThreads = (int) numThreads;
     encoder->autoTiling = USE_TILING;
 
