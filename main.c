@@ -37,11 +37,11 @@ static const float scrgb_to_bt2100[3][3] = {
         {12225392.L / 93230009375.L,    1772384008.L / 2517210253125.L, 18035212433.L / 2517210253125.L},
 };
 
-void matrixVectorMult(const float *in, float *out, const float *matrix) {
+void matrixVectorMult(const float in[3], float out[3], const float matrix[3][3]) {
     for (int i = 0; i < 3; i++) {
         float res = 0;
         for (int j = 0; j < 3; j++) {
-            res += matrix[3 * i + j] * in[j];
+            res += matrix[i][j] * in[j];
         }
         out[i] = res;
     }
@@ -82,16 +82,15 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
             float bt2020[3];
 
             if (bytesPerColor == 4) {
-                matrixVectorMult((float *) pixels + i * 4 * width + 4 * j, bt2020, (float *) scrgb_to_bt2100);
+                matrixVectorMult((float *) pixels + i * 4 * width + 4 * j, bt2020, scrgb_to_bt2100);
             } else {
                 float cur[3];
                 _Float16 *cur16 = (_Float16 *) pixels + i * 4 * width + 4 * j;
                 for (int k = 0; k < 3; k++) {
                     cur[k] = (float) cur16[k];
                 }
-                matrixVectorMult(cur, bt2020, (float *) scrgb_to_bt2100);
+                matrixVectorMult(cur, bt2020, scrgb_to_bt2100);
             }
-
 
             for (int k = 0; k < 3; k++) {
                 bt2020[k] = saturate(bt2020[k]);
@@ -123,7 +122,7 @@ DWORD WINAPI ThreadFunc(LPVOID lpParam) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc == 1 || argc > 3 && strcmp(argv[1], "--speed") || argc > 5) {
+    if (argc <= 1 || argc > 3 == strcmp(argv[1], "--speed") || argc > 5) {
         fprintf(stderr, "jxr_to_avif [--speed n] input.jxr [output.avif]\n");
         return 1;
     }
