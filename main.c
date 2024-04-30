@@ -53,7 +53,6 @@ float saturate(float x) {
 
 typedef struct ThreadData {
     uint8_t *pixels;
-    uint8_t bytesPerColor;
     uint16_t *converted;
     uint32_t width;
     uint32_t start;
@@ -63,6 +62,7 @@ typedef struct ThreadData {
     uint32_t *nitCounts;
 #endif
     uint16_t maxNits;
+    uint8_t bytesPerColor;
 } ThreadData;
 
 DWORD WINAPI ThreadFunc(LPVOID lpParam) {
@@ -252,7 +252,7 @@ int main(int argc, char *argv[]) {
 
     SYSTEM_INFO systemInfo;
     GetSystemInfo(&systemInfo);
-    uint32_t numThreads = systemInfo.dwNumberOfProcessors;
+    uint32_t numThreads = min(systemInfo.dwNumberOfProcessors, 64);
     printf("Using %d threads\n", numThreads);
 
     puts("Converting pixels to BT.2100 PQ...");
@@ -287,44 +287,58 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-        HANDLE hThreadArray[numThreads];
-        ThreadData *threadData[numThreads];
-        DWORD dwThreadIdArray[numThreads];
+        uint32_t convThreads = numThreads;
 
-        uint32_t chunkSize = (uint32_t) height / numThreads;
+        uint32_t chunkSize = height / convThreads;
 
-        for (uint32_t i = 0; i < numThreads; i++) {
-            threadData[i] = malloc(sizeof(threadData));
+        if (chunkSize == 0) {
+            convThreads = height;
+            chunkSize = 1;
+        }
+
+        HANDLE hThreadArray[convThreads];
+        ThreadData *threadData[convThreads];
+        DWORD dwThreadIdArray[convThreads];
+
+        for (uint32_t i = 0; i < convThreads; i++) {
+            threadData[i] = malloc(sizeof(ThreadData));
             threadData[i]->pixels = pixels;
             threadData[i]->bytesPerColor = bytesPerColor;
             threadData[i]->converted = converted;
             threadData[i]->width = width;
             threadData[i]->start = i * chunkSize;
-            if (i != numThreads - 1) {
+            if (i != convThreads - 1) {
                 threadData[i]->stop = (i + 1) * chunkSize;
             } else {
-                threadData[i]->stop = (int) height;
+                threadData[i]->stop = height;
             }
 
 #ifdef MAXCLL_PERCENTILE
             threadData[i]->nitCounts = calloc(10000, sizeof(typeof(threadData[i]->nitCounts[0])));
 #endif
 
-            hThreadArray[i] = CreateThread(
+            HANDLE hThread = CreateThread(
                     NULL,                   // default security attributes
                     0,                      // use default stack size
                     ThreadFunc,       // thread function name
                     threadData[i],          // argument to thread function
                     0,                      // use default creation flags
                     &dwThreadIdArray[i]);   // returns the thread identifier
+
+            if (hThread) {
+                hThreadArray[i] = hThread;
+            } else {
+                fprintf(stderr, "Failed to create thread\n");
+                return 1;
+            }
         }
 
-        WaitForMultipleObjects(numThreads, hThreadArray, TRUE, INFINITE);
+        WaitForMultipleObjects(convThreads, hThreadArray, TRUE, INFINITE);
 
         maxCLL = 0;
         double sumOfMaxComp = 0;
 
-        for (uint32_t i = 0; i < numThreads; i++) {
+        for (uint32_t i = 0; i < convThreads; i++) {
             CloseHandle(hThreadArray[i]);
 
             uint16_t tMaxNits = threadData[i]->maxNits;
@@ -340,7 +354,7 @@ int main(int argc, char *argv[]) {
         uint64_t count = 0;
         uint64_t countTarget = (uint64_t) round((1 - MAXCLL_PERCENTILE) * (double) ((uint64_t) width * height));
         while (1) {
-            for (uint32_t i = 0; i < numThreads; i++) {
+            for (uint32_t i = 0; i < convThreads; i++) {
                 count += threadData[i]->nitCounts[currentIdx];
             }
             if (count >= countTarget) {
@@ -351,7 +365,7 @@ int main(int argc, char *argv[]) {
         }
 #endif
 
-        for (uint32_t i = 0; i < numThreads; i++) {
+        for (uint32_t i = 0; i < convThreads; i++) {
 #ifdef MAXCLL_PERCENTILE
             free(threadData[i]->nitCounts);
 #endif
