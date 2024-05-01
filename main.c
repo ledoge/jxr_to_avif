@@ -306,7 +306,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Failed to allocate thread data\n");
                 return 1;
             }
-            
+
             threadData[i]->pixels = pixels;
             threadData[i]->bytesPerColor = bytesPerColor;
             threadData[i]->converted = converted;
