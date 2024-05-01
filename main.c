@@ -252,7 +252,7 @@ int main(int argc, char *argv[]) {
 
     SYSTEM_INFO systemInfo;
     GetSystemInfo(&systemInfo);
-    uint32_t numThreads = min(systemInfo.dwNumberOfProcessors, 64);
+    uint32_t numThreads = systemInfo.dwNumberOfProcessors;
     printf("Using %d threads\n", numThreads);
 
     puts("Converting pixels to BT.2100 PQ...");
@@ -287,7 +287,7 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-        uint32_t convThreads = numThreads;
+        uint32_t convThreads = min(numThreads, 64);
 
         uint32_t chunkSize = height / convThreads;
 
@@ -339,7 +339,14 @@ int main(int argc, char *argv[]) {
         double sumOfMaxComp = 0;
 
         for (uint32_t i = 0; i < convThreads; i++) {
-            CloseHandle(hThreadArray[i]);
+            HANDLE hThread = hThreadArray[i];
+
+            DWORD exitCode;
+            if (!GetExitCodeThread(hThread, &exitCode) || exitCode) {
+                fprintf(stderr, "Thread failed to terminate properly\n");
+                return 1;
+            }
+            CloseHandle(hThread);
 
             uint16_t tMaxNits = threadData[i]->maxNits;
             if (tMaxNits > maxCLL) {
