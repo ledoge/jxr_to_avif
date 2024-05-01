@@ -302,6 +302,11 @@ int main(int argc, char *argv[]) {
 
         for (uint32_t i = 0; i < convThreads; i++) {
             threadData[i] = malloc(sizeof(ThreadData));
+            if (threadData[i] == NULL) {
+                fprintf(stderr, "Failed to allocate thread data\n");
+                return 1;
+            }
+            
             threadData[i]->pixels = pixels;
             threadData[i]->bytesPerColor = bytesPerColor;
             threadData[i]->converted = converted;
